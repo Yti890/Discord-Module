@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Discord Module/Discord Module.csproj" Id="1c79bec8-8ff1-4ef2-a977-d68e16d48a7b" />
+  <Project Path="DiscordModuleBot/DiscordModuleBot.csproj" Id="bb6eb25a-75d9-4887-ab3e-81ee3feb873a" />
+  <Project Path="DiscordModuleDependency/DiscordModuleDependency.csproj" Id="f1e51288-b8f3-4323-8949-263196aafd66" />
+</Solution>
