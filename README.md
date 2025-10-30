@@ -6,7 +6,7 @@
 
 <p align="center">
   <a href="./LICENSE">
-    <img src="https://img.shields.io/github/license/Yti890/Discord-Module?style=flat-square" alt="License"/>
+    <img src="https://img.shields.io/github/license/Yti890/Discord-Module?style=flat-square&logo=github" alt="License"/>
   </a>
   <a href="https://github.com/Yti890/Discord-Module/releases">
     <img src="https://img.shields.io/github/v/release/Yti890/Discord-Module?style=flat-square&logo=github" alt="Release"/>
