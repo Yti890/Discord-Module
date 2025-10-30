@@ -1,9 +1,9 @@
 <h1 align="center">Config.json File</h1>
 
-- [README](https://github.com/Yti890/DiscordIntegration/blob/master/README.md)
+- [README](https://github.com/Yti890/Discord-Module/blob/master/README.md)
 - [LabAPI README](./README.LabAPI.md)
 - [Create Discord Bot README](./README.CDB.md)
-- [Localized bot logs. README](./README.Localization.md)
+- [Localization bot logs. README](./README.Localization.md)
 
 <h2 align="center">How configure the execution of game commands through Discord</h2>
 
