@@ -3,7 +3,7 @@
 - [README](https://github.com/Yti890/DiscordIntegration/blob/master/README.md)
 - [LabAPI README](./README.LabAPI.md)
 - [Create Discord Bot README](./README.CDB.md)
-- [Localized bot logs. README](/README/README.Localization.md)
+- [Localized bot logs. README](./README.Localization.md)
 
 <h2 align="center">How configure the execution of game commands through Discord</h2>
 
