@@ -1,6 +1,6 @@
 <h1 align="center">LabAPI Version</h1>
 
-- [README](https://github.com/Yti890/DiscordIntegration/blob/master/README.md)
+- [README](https://github.com/Yti890/Discord-Module/blob/master/README.md)
 - [Create Discord Bot README](./README.CDB.md)
 - [Config.json README](./README.CJF.md)
 - [Localization bot logs. README](./README.Localization.md)
