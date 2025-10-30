@@ -1,8 +1,6 @@
 <h1 align="center">Config.json File</h1>
 
 - [README](https://github.com/Yti890/DiscordIntegration/blob/master/README.md)
-- [Old README](./README.old.md)
-- [EXILED README](./README.EXILED.md)
 - [LabAPI README](./README.LabAPI.md)
 - [Create Discord Bot README](./README.CDB.md)  
 
