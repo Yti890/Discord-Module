@@ -33,7 +33,7 @@
 - [LabAPI README](./README/README.LabAPI.md)  
 - [Create Discord Bot README](./README/README.CDB.md)
 - [Config.json file README](./README/README.CJF.md)
-- [Localized bot logs. README](/README/README.Localization.md)
+- [Localization bot logs. README](/README/README.Localization.md)
 
 ---
 ## 🔎 Other
