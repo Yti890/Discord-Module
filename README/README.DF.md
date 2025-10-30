@@ -3,8 +3,6 @@ Knowing that there are issues with connecting the Bot to the Internet in some co
 
 And remember that I do not take responsibility for what is said here and what you will do with it; you are doing it at your own risk.
 
-Maybe i fix that, but i'm not sure.
-
 <h2 align="center">Network DNS ( Linux )</h2>
 
 ## You may need to configure the DNS to get it to work, but this is not mandatory. However, if the workaround does not work, I recommend doing as written.
