@@ -30,8 +30,6 @@
 
 ---
 ## 📚 Documentation
-- [Old README](./README/README.old.md)
-- [EXILED README](./README/README.EXILED.md)
 - [LabAPI README](./README/README.LabAPI.md)  
 - [Create Discord Bot README](./README/README.CDB.md)
 - [Config.json file README](./README/README.CJF.md)
@@ -43,3 +41,4 @@
 ---
 ## ℹ️ Information
 <p>Some code was either taken directly from DiscordIntegration or modified considering what could have been a problem, or actually was a problem; I do not claim to infringe on the copyright of Exiled Team.</p>
+<p>The version for EXILED is not available yet, please wait.</p>
