@@ -98,6 +98,7 @@ namespace DiscordModuleBot.API.Services
                 {
                     int bytesRead = await stream.ReadAsync(buffer, 0, buffer.Length, cancellationToken);
                     if (bytesRead == 0) break;
+
                     var text = Encoding.UTF8.GetString(buffer, 0, bytesRead);
                     sb.Append(text);
                     var data = sb.ToString();
@@ -106,6 +107,7 @@ namespace DiscordModuleBot.API.Services
                     {
                         var message = data.Substring(0, nullPos);
                         data = data.Substring(nullPos + 1);
+
                         if (!string.IsNullOrWhiteSpace(message))
                         {
                             try
@@ -129,8 +131,16 @@ namespace DiscordModuleBot.API.Services
             }
             finally
             {
-                lock (clients) clients.Remove(client);
-                client.Dispose();
+                lock (clients)
+                {
+                    clients.Remove(client);
+                    client.Dispose();
+                    if (clients.Count == 0)
+                    {
+                        _ = bot.Client.SetStatusAsync(Discord.UserStatus.DoNotDisturb);
+                        _ = bot.Client.SetActivityAsync(new Discord.Game("Waiting for connection..."));
+                    }
+                }
             }
         }
         public void Close() => Dispose();

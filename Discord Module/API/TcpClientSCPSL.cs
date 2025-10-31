@@ -47,6 +47,8 @@ namespace Discord_Module.API
             if (disposed)
                 throw new ObjectDisposedException(GetType().FullName);
 
+            UpdateBotStots(cancelSource);
+            UpdateBotTopic(cancelSource);
             await MaintainConnection(cancelSource).ContinueWith(t =>
             {
                 if (t.IsFaulted)
@@ -59,8 +61,6 @@ namespace Discord_Module.API
                 cancelSource = new CancellationTokenSource();
                 _ = this.Initiate(cancelSource);
             }).ConfigureAwait(false);
-            await UpdateBotStots(cancelSource).ConfigureAwait(false);
-            await UpdateBotTopic(cancelSource).ConfigureAwait(false);
         }
         public void Shutdown() => Dispose();
         public async ValueTask TransmitAsync<T>(T data) => await TransmitAsync(data, CancellationToken.None);
@@ -257,7 +257,7 @@ namespace Discord_Module.API
 
                     string warheadText = Warhead.IsDetonated ? PluginStart._lang.WarheadHasBeenDetonated : Warhead.IsDetonationInProgress ? PluginStart._lang.WarheadIsCountingToDetonation : PluginStart._lang.WarheadHasntBeenDetonated;
 
-                    await TransmitAsync(new RemoteClient(ActionType.UpdateChannelActivity, $"{string.Format(PluginStart._lang.PlayersOnline, Player.Dictionary.Count, Server.MaxPlayers)}. {string.Format(PluginStart._lang.RoundDuration, Round.Duration)}. {string.Format(PluginStart._lang.AliveHumans, aliveHumans)}. {string.Format(PluginStart._lang.AliveScps, aliveScps)}. {warheadText} IP: {Server.IpAddress}:{Server.Port} TPS: {Server.Tps}"), cancelSource.Token);
+                    await TransmitAsync(new RemoteClient(ActionType.UpdateChannelActivity, $"{string.Format(PluginStart._lang.PlayersOnline, Player.Count, Server.MaxPlayers)}. {string.Format(PluginStart._lang.RoundDuration, Round.Duration)}. {string.Format(PluginStart._lang.AliveHumans, aliveHumans)}. {string.Format(PluginStart._lang.AliveScps, aliveScps)}. {warheadText} IP: {Server.IpAddress}:{Server.Port} TPS: {Server.Tps}"), cancelSource.Token);
                 }
                 catch (Exception exception)
                 {
