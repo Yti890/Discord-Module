@@ -167,20 +167,25 @@ namespace DiscordModuleBot
         {
             try
             {
-                var split = command.Parameters[0].ToString()!.Split('/');
-                int count = int.Parse(split[0]);
-                int total = int.Parse(split[1]);
+                string param = command.Parameters[0]?.ToString() ?? "[Players: 0/0 : Admins: 0]";
+                int count = 0;
+                int total = 0;
 
+                var match = System.Text.RegularExpressions.Regex.Match(param, @"Players:\s*(\d+)/(\d+)");
+                if (match.Success)
+                {
+                    int.TryParse(match.Groups[1].Value, out count);
+                    int.TryParse(match.Groups[2].Value, out total);
+                }
                 if (count > 0 && Client.Status != UserStatus.Online)
                     await Client.SetStatusAsync(UserStatus.Online);
                 else if (count == 0 && Client.Status != UserStatus.AFK)
                     await Client.SetStatusAsync(UserStatus.AFK);
-
                 if (count != _lastCount || total != _lastTotal)
                 {
                     _lastCount = count;
                     _lastTotal = total > 0 ? total : _lastTotal;
-                    await Client.SetActivityAsync(new Game($"{_lastCount}/{_lastTotal}"));
+                    await Client.SetActivityAsync(new Game(param));
                 }
             }
             catch (Exception e)

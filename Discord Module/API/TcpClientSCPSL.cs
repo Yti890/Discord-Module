@@ -4,9 +4,11 @@ using Discord_Module.API.Other;
 using DiscordModuleDependency;
 using LabApi.Features.Console;
 using LabApi.Features.Wrappers;
+using MEC;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Serialization;
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -22,6 +24,21 @@ namespace Discord_Module.API
         public const int ReceiveBufferSize = 4080;
         private bool disposed;
         private bool readyToSend;
+
+        private CoroutineHandle updateBotStatusCoroutine;
+        private CoroutineHandle updateBotTopicCoroutine;
+
+        public TcpClient? Client { get; private set; }
+        public IPEndPoint Endpoint { get; private set; }
+        public bool Connected => Client?.Connected ?? false;
+        public TimeSpan RetryInterval { get; private set; }
+
+        public JsonSerializerSettings SerializerSettings { get; } = new JsonSerializerSettings
+        {
+            ContractResolver = new CamelCasePropertyNamesContractResolver(),
+            TypeNameHandling = TypeNameHandling.Objects,
+        };
+
         public TcpClientSCPSL(string ip, ushort port, TimeSpan retryInterval)
             : this(new IPEndPoint(IPAddress.Parse(ip), port), retryInterval)
         {
@@ -32,38 +49,29 @@ namespace Discord_Module.API
             Endpoint = endpoint;
             RetryInterval = retryInterval;
         }
+
         TcpClientSCPSL() => Dispose(false);
-        public TcpClient? Client { get; private set; }
-        public IPEndPoint Endpoint { get; private set; }
-        public bool Connected => Client?.Connected ?? false;
-        public TimeSpan RetryInterval { get; private set; }
-        public JsonSerializerSettings SerializerSettings { get; } = new JsonSerializerSettings
-        {
-            ContractResolver = new CamelCasePropertyNamesContractResolver(),
-            TypeNameHandling = TypeNameHandling.Objects,
-        };
+
         public async Task Initiate(CancellationTokenSource cancelSource)
         {
             if (disposed)
                 throw new ObjectDisposedException(GetType().FullName);
+            if (!updateBotStatusCoroutine.IsRunning)
+                updateBotStatusCoroutine = Timing.RunCoroutine(UpdateBotStots(cancelSource));
 
-            UpdateBotStots(cancelSource);
-            UpdateBotTopic(cancelSource);
-            await MaintainConnection(cancelSource).ContinueWith(t =>
-            {
-                if (t.IsFaulted)
-                    Logger.Error($"[CON] {string.Format(PluginStart._lang.UpdatingConnectionError, PluginStart.Instance.Config.Debug ? t.Exception.ToString() : t.Exception.Message)}");
-                else
-                    Logger.Warn($"[CON] {PluginStart._lang.ServerHasBeenTerminated}");
-
-                cancelSource.Cancel();
-                cancelSource.Dispose();
-                cancelSource = new CancellationTokenSource();
-                _ = this.Initiate(cancelSource);
-            }).ConfigureAwait(false);
+            if (!updateBotTopicCoroutine.IsRunning)
+                updateBotTopicCoroutine = Timing.RunCoroutine(UpdateBotTopic(cancelSource));
+            await MaintainConnection(cancelSource);
         }
-        public void Shutdown() => Dispose();
+
+        public void Shutdown()
+        {
+            Timing.KillCoroutines(updateBotStatusCoroutine, updateBotTopicCoroutine);
+            Dispose();
+        }
+
         public async ValueTask TransmitAsync<T>(T data) => await TransmitAsync(data, CancellationToken.None);
+
         public async ValueTask TransmitAsync<T>(T data, CancellationToken cancelToken)
         {
             try
@@ -88,7 +96,7 @@ namespace Discord_Module.API
                 string jsonData = JsonConvert.SerializeObject(data, SerializerSettings);
                 byte[] sendBytes = Encoding.UTF8.GetBytes(jsonData + '\0');
                 await Client!.GetStream().WriteAsync(sendBytes, 0, sendBytes.Length, cancelToken);
-                Logger.Debug(string.Format("Data Send", jsonData, sendBytes.Length), PluginStart.Instance.Config.Debug);
+                Logger.Debug($"[CON] Data Sent ({sendBytes.Length} bytes): {jsonData}", PluginStart.Instance.Config.Debug);
             }
             catch (Exception ex) when (ex.GetType() != typeof(OperationCanceledException))
             {
@@ -96,7 +104,9 @@ namespace Discord_Module.API
                 Client?.Dispose();
             }
         }
+
         public void Dispose() => Dispose(true);
+
         protected virtual void Dispose(bool disposeAll)
         {
             if (disposeAll)
@@ -119,9 +129,11 @@ namespace Discord_Module.API
                 {
                     if (Client == null)
                         return;
+
                     Task<int> readOp = Client.GetStream().ReadAsync(buffer, 0, buffer.Length, cancelSource.Token);
                     await Task.WhenAny(readOp, Task.Delay(10000, cancelSource.Token)).ConfigureAwait(false);
                     cancelSource.Token.ThrowIfCancellationRequested();
+
                     int readBytes = await readOp;
                     if (readBytes > 0)
                     {
@@ -145,22 +157,26 @@ namespace Discord_Module.API
                                     switch (cmd.Action)
                                     {
                                         case ActionType.ExecuteCommand:
-                                            GameCommand command = new GameCommand(cmd.Parameters[0].ToString(), cmd.Parameters[1].ToString(), new DiscordUser(cmd.Parameters[2].ToString(), cmd.Parameters[3].ToString(), cmd.Parameters[1].ToString()));
+                                            GameCommand command = new GameCommand(cmd.Parameters[0].ToString(), cmd.Parameters[1].ToString(),
+                                                new DiscordUser(cmd.Parameters[2].ToString(), cmd.Parameters[3].ToString(), cmd.Parameters[1].ToString()));
                                             command?.Execute();
                                             break;
+
                                         case ActionType.CommandReply:
                                             JsonConvert.DeserializeObject<CommandReply>(cmd.Parameters[0].ToString(), SerializerSettings)?.Answer();
                                             break;
+
                                         case ActionType.AdminMessage:
                                             foreach (var plr in Player.List)
                                             {
-                                                if (PermissionsHandler.IsPermitted(plr.ReferenceHub.serverRoles.Permissions, PlayerPermissions.AdminChat) == true)
+                                                if (plr.HasPermission(PlayerPermissions.AdminChat))
                                                 {
                                                     plr.SendConsoleMessage(cmd.Parameters[0].ToString(), UnityEngine.Color.green.ToString());
                                                     plr.SendBroadcast(cmd.Parameters[0].ToString(), 10, global::Broadcast.BroadcastFlags.Normal, false);
                                                 }
                                             }
                                             break;
+
                                         case ActionType.AutomaticRoles:
                                             Server.RunCommand(cmd.Parameters[0].ToString());
                                             break;
@@ -192,6 +208,7 @@ namespace Discord_Module.API
                 }
             }
         }
+
         private async Task MaintainConnection(CancellationTokenSource cancelSource)
         {
             while (!cancelSource.IsCancellationRequested)
@@ -206,8 +223,7 @@ namespace Discord_Module.API
 
                     Logger.Warn($"[CON] {PluginStart._lang.AttemptingReconnect}");
 
-                    IPAddress addr;
-                    if (!IPAddress.TryParse(PluginStart.Instance.Config.IPAddress, out addr))
+                    if (!IPAddress.TryParse(PluginStart.Instance.Config.IPAddress, out IPAddress addr))
                     {
                         Logger.Error($"[CON] {PluginStart._lang.InvalidIPAddress}, {PluginStart.Instance.Config.IPAddress}");
                         await Task.Delay(RetryInterval, cancelSource.Token);
@@ -246,7 +262,8 @@ namespace Discord_Module.API
                 await Task.Delay(RetryInterval, cancelSource.Token);
             }
         }
-        private async Task UpdateBotTopic(CancellationTokenSource cancelSource)
+
+        private IEnumerator<float> UpdateBotTopic(CancellationTokenSource cancelSource)
         {
             while (!cancelSource.IsCancellationRequested)
             {
@@ -254,32 +271,42 @@ namespace Discord_Module.API
                 {
                     int aliveHumans = Player.List.Count(player => player.IsAlive && player.IsHuman);
                     int aliveScps = Player.List.Count(x => x.IsSCP);
+                    string warheadText = Warhead.IsDetonated
+                        ? PluginStart._lang.WarheadHasBeenDetonated
+                        : Warhead.IsDetonationInProgress
+                            ? PluginStart._lang.WarheadIsCountingToDetonation
+                            : PluginStart._lang.WarheadHasntBeenDetonated;
 
-                    string warheadText = Warhead.IsDetonated ? PluginStart._lang.WarheadHasBeenDetonated : Warhead.IsDetonationInProgress ? PluginStart._lang.WarheadIsCountingToDetonation : PluginStart._lang.WarheadHasntBeenDetonated;
-
-                    await TransmitAsync(new RemoteClient(ActionType.UpdateChannelActivity, $"{string.Format(PluginStart._lang.PlayersOnline, Player.Count, Server.MaxPlayers)}. {string.Format(PluginStart._lang.RoundDuration, Round.Duration)}. {string.Format(PluginStart._lang.AliveHumans, aliveHumans)}. {string.Format(PluginStart._lang.AliveScps, aliveScps)}. {warheadText} IP: {Server.IpAddress}:{Server.Port} TPS: {Server.Tps}"), cancelSource.Token);
+                    _ = TransmitAsync(new RemoteClient(ActionType.UpdateChannelActivity,
+                        $"{string.Format(PluginStart._lang.PlayersOnline, Server.PlayerCount, Server.MaxPlayers)}. " +
+                        $"{string.Format(PluginStart._lang.RoundDuration, Round.Duration)}. " +
+                        $"{string.Format(PluginStart._lang.AliveHumans, aliveHumans)}. " +
+                        $"{string.Format(PluginStart._lang.AliveScps, aliveScps)}. {warheadText} " +
+                        $"IP: {Server.IpAddress}:{Server.Port} TPS: {Server.Tps}"));
                 }
                 catch (Exception exception)
                 {
                     Logger.Error(string.Format(PluginStart._lang.CouldNotUpdateChannelTopicError, exception));
                 }
 
-                await Task.Delay(TimeSpan.FromSeconds(15), cancelSource.Token);
+                yield return Timing.WaitForSeconds(15f);
             }
         }
-        private async Task UpdateBotStots(CancellationTokenSource cancelSource)
+
+        private IEnumerator<float> UpdateBotStots(CancellationTokenSource cancelSource)
         {
             while (!cancelSource.IsCancellationRequested)
             {
                 try
                 {
-                    await TransmitAsync(new RemoteClient(ActionType.UpdateActivity, $"{Player.Count}/{Server.MaxPlayers}"), cancelSource.Token);
-                    await Task.Delay(TimeSpan.FromSeconds(3), cancelSource.Token);
+                    int adminscount = Player.List.Count(player => player.HasPermission(PlayerPermissions.AdminChat));
+                    _ = TransmitAsync(new RemoteClient(ActionType.UpdateActivity, $"[Players: {Server.PlayerCount}/{Server.MaxPlayers} ; Admins: {adminscount}]"));
                 }
                 catch (Exception)
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(3), cancelSource.Token);
                 }
+
+                yield return Timing.WaitForSeconds(3f);
             }
         }
     }

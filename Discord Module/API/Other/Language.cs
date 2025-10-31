@@ -1,6 +1,9 @@
-﻿using Newtonsoft.Json;
+﻿using LabApi.Features.Console;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Linq;
 using System;
 using System.IO;
+using System.Linq;
 
 namespace Discord_Module.API.Other
 {
@@ -149,20 +152,59 @@ namespace Discord_Module.API.Other
             }
         }
 
-        public void Save(string languageCode, bool overwrite)
+        public void Save(string languageCode)
         {
             string path = FullPath(languageCode);
-            if (File.Exists(path) && !overwrite) return;
-            if (!Directory.Exists(Folder)) Directory.CreateDirectory(Folder);
+            if (!Directory.Exists(Folder))
+                Directory.CreateDirectory(Folder);
+            try
+            {
+                var allProps = typeof(Language).GetProperties()
+                    .Where(p => p.PropertyType == typeof(string))
+                    .ToDictionary(p => p.Name, p => (string)p.GetValue(this)!);
 
-            using var writer = new StreamWriter(path);
-            jsonSerializer.Serialize(writer, this);
-            Console.WriteLine($"Language file saved: {path}");
+                JObject result;
+
+                if (File.Exists(path))
+                {
+                    var existingJson = File.ReadAllText(path);
+                    result = JObject.Parse(existingJson);
+                    bool changed = false;
+                    foreach (var kvp in allProps)
+                    {
+                        if (!result.ContainsKey(kvp.Key))
+                        {
+                            result[kvp.Key] = kvp.Value;
+                            changed = true;
+                        }
+                    }
+
+                    if (changed)
+                    {
+                        File.WriteAllText(path, result.ToString(Formatting.Indented));
+                        Logger.Debug($"[Lang] Added missing keys to: {path}", PluginStart.Instance.Config.Debug);
+                    }
+                    else
+                    {
+                        Logger.Debug($"[Lang] All keys already present in: {path}", PluginStart.Instance.Config.Debug);
+                    }
+                }
+                else
+                {
+                    result = JObject.FromObject(allProps);
+                    File.WriteAllText(path, result.ToString(Formatting.Indented));
+                    Logger.Debug($"[Lang] Created new language file: {path}", PluginStart.Instance.Config.Debug);
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Debug($"[Lang] Failed to save language file {languageCode}: {ex.Message}", PluginStart.Instance.Config.Debug);
+            }
         }
 
         private void HandleJsonError(object sender, Newtonsoft.Json.Serialization.ErrorEventArgs ev)
         {
-            Console.WriteLine($"Translation key not found: {ev.ErrorContext.Member}, using default value.");
+            Logger.Debug($"Translation key not found: {ev.ErrorContext.Member}, using default value.", PluginStart.Instance.Config.Debug);
             ev.ErrorContext.Handled = true;
         }
     }

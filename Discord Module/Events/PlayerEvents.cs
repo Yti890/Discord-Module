@@ -56,7 +56,7 @@ namespace Discord_Module.Events
         public override async void OnPlayerLeft(PlayerLeftEventArgs ev)
         {
             if (!ev.Player.DoNotTrack)
-                await PluginStart._client.TransmitAsync(new RemoteClient(ActionType.Log, ChannelType.GameEvents, string.Format(PluginStart._lang.LeftServer, ev.Player.Nickname, ev.Player.UserId, ev.Player.Role))).ConfigureAwait(false);
+            await PluginStart._client.TransmitAsync(new RemoteClient(ActionType.Log, ChannelType.GameEvents, string.Format(PluginStart._lang.LeftServer, ev.Player.Nickname, ev.Player.UserId, ev.Player.Role))).ConfigureAwait(false);
             base.OnPlayerLeft(ev);
         }
         public override async void OnPlayerReloadingWeapon(PlayerReloadingWeaponEventArgs ev)
