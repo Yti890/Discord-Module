@@ -1,5 +1,4 @@
-﻿using CommandSystem.Commands.RemoteAdmin.PermissionsManagement.Group;
-using Discord_Module.API.Commands;
+﻿using Discord_Module.API.Commands;
 using Discord_Module.API.Other;
 using DiscordModuleDependency;
 using LabApi.Features.Console;
@@ -22,22 +21,29 @@ namespace Discord_Module.API
     public class TcpClientSCPSL : IDisposable
     {
         public const int ReceiveBufferSize = 4080;
-        private bool disposed;
-        private bool readyToSend;
+        public const int MaxAccumulatedDataSize = 1024 * 1024;
+        private const int ConnectTimeoutMs = 10_000;
+        private const int SendTimeoutMs = 10_000;
+        private const int ReceiveTimeoutMs = 30_000;
 
+        private bool disposed;
+        private volatile bool readyToSend;
+        private bool firstrestart = false;
         private CoroutineHandle updateBotStatusCoroutine;
         private CoroutineHandle updateBotTopicCoroutine;
-
-        public TcpClient? Client { get; private set; }
+        private TcpClient? Client { get; set; }
         public IPEndPoint Endpoint { get; private set; }
         public bool Connected => Client?.Connected ?? false;
         public TimeSpan RetryInterval { get; private set; }
-
         public JsonSerializerSettings SerializerSettings { get; } = new JsonSerializerSettings
         {
             ContractResolver = new CamelCasePropertyNamesContractResolver(),
             TypeNameHandling = TypeNameHandling.Objects,
         };
+
+        private readonly object _lock = new object();
+        private Task? _listenTask;
+        private readonly SemaphoreSlim _sendLock = new SemaphoreSlim(1, 1);
 
         public TcpClientSCPSL(string ip, ushort port, TimeSpan retryInterval)
             : this(new IPEndPoint(IPAddress.Parse(ip), port), retryInterval)
@@ -50,25 +56,53 @@ namespace Discord_Module.API
             RetryInterval = retryInterval;
         }
 
-        TcpClientSCPSL() => Dispose(false);
+        ~TcpClientSCPSL() => Dispose(false);
 
         public async Task Initiate(CancellationTokenSource cancelSource)
         {
-            if (disposed)
-                throw new ObjectDisposedException(GetType().FullName);
-            if (!updateBotStatusCoroutine.IsRunning)
-                updateBotStatusCoroutine = Timing.RunCoroutine(UpdateBotStots(cancelSource));
-
-            if (!updateBotTopicCoroutine.IsRunning)
-                updateBotTopicCoroutine = Timing.RunCoroutine(UpdateBotTopic(cancelSource));
-            await MaintainConnection(cancelSource);
+            lock (_lock)
+            {
+                if (disposed)
+                    throw new ObjectDisposedException(GetType().FullName);
+            }
+            await MaintainConnection(cancelSource).ConfigureAwait(false);
         }
 
         public void Shutdown()
         {
-            Timing.KillCoroutines(updateBotStatusCoroutine, updateBotTopicCoroutine);
-            Dispose();
+            lock (_lock)
+            {
+                if (disposed)
+                    return;
+
+                Logger.Info("[CON] Shutdown initiated.");
+
+                try
+                {
+                    Timing.KillCoroutines(updateBotStatusCoroutine);
+                    Timing.KillCoroutines(updateBotTopicCoroutine);
+                }
+                catch { }
+                try
+                {
+                    PluginStart._cts?.Cancel();
+                }
+                catch { }
+                try
+                {
+                    Client?.Close();
+                    Client?.Dispose();
+                    Client = null;
+                }
+                catch { }
+                readyToSend = false;
+                disposed = true;
+                firstrestart = false;
+
+                Logger.Info("[CON] Shutdown complete.");
+            }
         }
+
 
         public async ValueTask TransmitAsync<T>(T data) => await TransmitAsync(data, CancellationToken.None);
 
@@ -109,101 +143,169 @@ namespace Discord_Module.API
 
         protected virtual void Dispose(bool disposeAll)
         {
-            if (disposeAll)
+            lock (_lock)
             {
-                Client?.Dispose();
-                Client = null;
-                Endpoint = null;
+                if (disposeAll)
+                {
+                    try
+                    {
+                        Client?.Close();
+                        Client?.Dispose();
+                    }
+                    catch { }
+                    Client = null;
+
+                    try { Timing.KillCoroutines(updateBotStatusCoroutine); } catch { }
+                    try { Timing.KillCoroutines(updateBotTopicCoroutine); } catch { }
+                }
+                disposed = true;
             }
-            disposed = true;
             GC.SuppressFinalize(this);
         }
 
         private async Task ListenAsync(CancellationTokenSource cancelSource)
         {
-            StringBuilder accumulatedData = new();
-            byte[] buffer = new byte[ReceiveBufferSize];
-            while (true)
+            var buffer = new byte[ReceiveBufferSize];
+            var sb = new StringBuilder();
+
+            while (!cancelSource.IsCancellationRequested)
             {
+                TcpClient? client;
+                lock (_lock)
+                {
+                    client = Client;
+                }
+
+                if (client == null || !client.Connected)
+                {
+                    return;
+                }
+
+                NetworkStream? stream;
                 try
                 {
-                    if (Client == null)
-                        return;
-
-                    Task<int> readOp = Client.GetStream().ReadAsync(buffer, 0, buffer.Length, cancelSource.Token);
-                    await Task.WhenAny(readOp, Task.Delay(10000, cancelSource.Token)).ConfigureAwait(false);
-                    cancelSource.Token.ThrowIfCancellationRequested();
-
-                    int readBytes = await readOp;
-                    if (readBytes > 0)
+                    stream = client.GetStream();
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"[CON] Failed to get stream in ListenAsync: {ex.Message}");
+                    lock (_lock)
                     {
-                        string incomingData = Encoding.UTF8.GetString(buffer, 0, readBytes);
-                        accumulatedData.Append(incomingData);
-                        string data = accumulatedData.ToString();
-                        int nullPos;
-                        while ((nullPos = data.IndexOf('\0')) >= 0)
+                        client?.Dispose();
+                        Client = null;
+                        readyToSend = false;
+                    }
+                    return;
+                }
+
+                try
+                {
+                    using var readCts = CancellationTokenSource.CreateLinkedTokenSource(cancelSource.Token);
+                    readCts.CancelAfter(ReceiveTimeoutMs);
+
+                    int readBytes = await stream.ReadAsync(buffer, 0, buffer.Length, readCts.Token).ConfigureAwait(false);
+                    if (readBytes <= 0)
+                        throw new IOException("Connection closed by remote host.");
+
+                    string incoming = Encoding.UTF8.GetString(buffer, 0, readBytes);
+                    sb.Append(incoming);
+
+                    if (sb.Length > MaxAccumulatedDataSize)
+                    {
+                        Logger.Warn("[CON] Accumulated data exceeded max size; clearing buffer to prevent memory issues.");
+                        sb.Clear();
+                        continue;
+                    }
+
+                    string total = sb.ToString();
+                    int processedUpTo = 0;
+                    int nullPos;
+                    while ((nullPos = total.IndexOf('\0', processedUpTo)) >= 0)
+                    {
+                        string message = total.Substring(processedUpTo, nullPos - processedUpTo);
+                        processedUpTo = nullPos + 1;
+
+                        if (string.IsNullOrWhiteSpace(message))
+                            continue;
+
+                        try
                         {
-                            var message = data.Substring(0, nullPos);
-                            data = data.Substring(nullPos + 1);
-                            if (!string.IsNullOrWhiteSpace(message))
+                            RemoteClient cmd = JsonConvert.DeserializeObject<RemoteClient>(message, SerializerSettings);
+                            Logger.Debug($"[CON] Handling: {cmd.Action}", PluginStart.Instance.Config.Debug);
+
+                            switch (cmd.Action)
                             {
-                                try
-                                {
-                                    JsonConvert.DeserializeObject<object>(message);
-                                    Logger.Debug($"[CON] {string.Format(PluginStart._lang.ReceivedData, message, message.Length)}", PluginStart.Instance.Config.Debug);
-                                    RemoteClient cmd = JsonConvert.DeserializeObject<RemoteClient>(message, SerializerSettings);
-                                    Logger.Debug($"[CON] {string.Format(PluginStart._lang.HandlingRemoteClient, cmd.Action, cmd.Parameters[0], Client?.Client?.RemoteEndPoint)}", PluginStart.Instance.Config.Debug);
+                                case ActionType.ExecuteCommand:
+                                    var command = new GameCommand(cmd.Parameters[0].ToString(), cmd.Parameters[1].ToString(),
+                                        new DiscordUser(cmd.Parameters[2].ToString(), cmd.Parameters[3].ToString(), cmd.Parameters[1].ToString()));
+                                    command?.Execute();
+                                    break;
 
-                                    switch (cmd.Action)
+                                case ActionType.CommandReply:
+                                    JsonConvert.DeserializeObject<CommandReply>(cmd.Parameters[0].ToString(), SerializerSettings)?.Answer();
+                                    break;
+
+                                case ActionType.AdminMessage:
+                                    foreach (var plr in Player.List ?? Enumerable.Empty<Player>())
                                     {
-                                        case ActionType.ExecuteCommand:
-                                            GameCommand command = new GameCommand(cmd.Parameters[0].ToString(), cmd.Parameters[1].ToString(),
-                                                new DiscordUser(cmd.Parameters[2].ToString(), cmd.Parameters[3].ToString(), cmd.Parameters[1].ToString()));
-                                            command?.Execute();
-                                            break;
-
-                                        case ActionType.CommandReply:
-                                            JsonConvert.DeserializeObject<CommandReply>(cmd.Parameters[0].ToString(), SerializerSettings)?.Answer();
-                                            break;
-
-                                        case ActionType.AdminMessage:
-                                            foreach (var plr in Player.List)
-                                            {
-                                                if (plr.HasPermission(PlayerPermissions.AdminChat))
-                                                {
-                                                    plr.SendConsoleMessage(cmd.Parameters[0].ToString(), UnityEngine.Color.green.ToString());
-                                                    plr.SendBroadcast(cmd.Parameters[0].ToString(), 10, global::Broadcast.BroadcastFlags.Normal, false);
-                                                }
-                                            }
-                                            break;
-
-                                        case ActionType.AutomaticRoles:
-                                            Server.RunCommand(cmd.Parameters[0].ToString());
-                                            break;
+                                        if (plr.HasPermission(PlayerPermissions.AdminChat))
+                                        {
+                                            plr.SendConsoleMessage(cmd.Parameters[0].ToString(), UnityEngine.Color.green.ToString());
+                                            plr.SendBroadcast(cmd.Parameters[0].ToString(), 10, global::Broadcast.BroadcastFlags.Normal, false);
+                                        }
                                     }
-                                }
-                                catch (JsonException jsonEx)
-                                {
-                                    Logger.Warn($"[CON] Partial or invalid JSON received: {message}. Error: {jsonEx.Message}");
-                                }
-                                catch (Exception ex)
-                                {
-                                    Logger.Error($"[CON] {string.Format(PluginStart._lang.HandlingRemoteClientError, PluginStart.Instance.Config.Debug ? ex.ToString() : ex.Message)}");
-                                }
+                                    break;
+
+                                case ActionType.AutomaticRoles:
+                                    Server.RunCommand(cmd.Parameters[0].ToString());
+                                    break;
                             }
                         }
-                        accumulatedData.Clear();
-                        accumulatedData.Append(data);
+                        catch (JsonException jsonEx)
+                        {
+                            Logger.Warn($"[CON] Invalid JSON received: {message}. Error: {jsonEx.Message}");
+                        }
+                        catch (Exception ex)
+                        {
+                            Logger.Error($"[CON] Error handling remote client: {(PluginStart.Instance.Config.Debug ? ex.ToString() : ex.Message)}");
+                        }
+                    }
+
+                    if (processedUpTo == 0)
+                    {
+                        if (sb.Length > MaxAccumulatedDataSize / 2)
+                        {
+                            sb.Remove(0, sb.Length - (MaxAccumulatedDataSize / 2));
+                        }
                     }
                     else
                     {
-                        throw new IOException("Connection closed by remote host.");
+                        sb.Remove(0, processedUpTo);
                     }
+                }
+                catch (OperationCanceledException)
+                {
+                    if (cancelSource.IsCancellationRequested)
+                        return;
+
+                    Logger.Warn("[CON] Read timed out; dropping connection.");
+                    lock (_lock)
+                    {
+                        client?.Dispose();
+                        Client = null;
+                        readyToSend = false;
+                    }
+                    return;
                 }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     Logger.Error($"[CON] Receive error: {ex.Message}");
-                    Client?.Dispose();
+                    lock (_lock)
+                    {
+                        client?.Dispose();
+                        Client = null;
+                        readyToSend = false;
+                    }
                     return;
                 }
             }
@@ -213,35 +315,95 @@ namespace Discord_Module.API
         {
             while (!cancelSource.IsCancellationRequested)
             {
-                try
+                bool isConnected;
+                lock (_lock)
                 {
-                    if (Client is { Connected: true })
-                    {
-                        await Task.Delay(1000, cancelSource.Token);
-                        continue;
-                    }
+                    isConnected = Connected;
+                }
 
+                if (isConnected)
+                {
+                    await Task.Delay(1000, cancelSource.Token).ConfigureAwait(false);
+                    continue;
+                }
+
+                if (!firstrestart)
+                    firstrestart = true;
+                else
                     Logger.Warn($"[CON] {PluginStart._lang.AttemptingReconnect}");
 
-                    if (!IPAddress.TryParse(PluginStart.Instance.Config.IPAddress, out IPAddress addr))
+                if (!IPAddress.TryParse(PluginStart.Instance.Config.IPAddress, out IPAddress addr))
+                {
+                    Logger.Error($"[CON] {PluginStart._lang.InvalidIPAddress}, {PluginStart.Instance.Config.IPAddress}");
+                    try { await Task.Delay(RetryInterval, cancelSource.Token).ConfigureAwait(false); } catch { }
+                    continue;
+                }
+
+                lock (_lock)
+                {
+                    try { Timing.KillCoroutines(updateBotStatusCoroutine); } catch { }
+                    try { Timing.KillCoroutines(updateBotTopicCoroutine); } catch { }
+
+                    try
                     {
-                        Logger.Error($"[CON] {PluginStart._lang.InvalidIPAddress}, {PluginStart.Instance.Config.IPAddress}");
-                        await Task.Delay(RetryInterval, cancelSource.Token);
-                        continue;
+                        Client?.Close();
+                        Client?.Dispose();
+                    }
+                    catch { }
+
+                    Client = new TcpClient();
+                }
+
+                Logger.Warn($"[CON] {string.Format(PluginStart._lang.ConnectingTo, addr, PluginStart.Instance.Config.Port)}");
+
+                try
+                {
+                    var connectTask = Client.ConnectAsync(addr, PluginStart.Instance.Config.Port);
+                    var timeoutTask = Task.Delay(ConnectTimeoutMs, cancelSource.Token);
+                    var completed = await Task.WhenAny(connectTask, timeoutTask).ConfigureAwait(false);
+
+                    if (completed != connectTask)
+                        throw new SocketException((int)SocketError.TimedOut);
+
+                    lock (_lock)
+                    {
+                        if (Client == null)
+                            throw new IOException("Client disposed during connect.");
+                        readyToSend = true;
                     }
 
-                    ushort p = PluginStart.Instance.Config.Port;
-                    Endpoint = new IPEndPoint(addr, p);
-
-                    Client?.Dispose();
-                    Client = new TcpClient();
-                    Logger.Warn($"[CON] {string.Format(PluginStart._lang.ConnectingTo, addr, p)}");
-                    await Client.ConnectAsync(Endpoint.Address, Endpoint.Port);
-
-                    readyToSend = true;
                     Logger.Info($"[CON] {string.Format(PluginStart._lang.SuccessfullyConnected, Endpoint?.Address, Endpoint?.Port)}");
-                    await TransmitAsync(new RemoteClient(ActionType.Log, ChannelType.GameEvents, PluginStart._lang.ServerConnected));
-                    await ListenAsync(cancelSource);
+
+                    try
+                    {
+                        lock (_lock)
+                        {
+                            try
+                            {
+                                if (!updateBotStatusCoroutine.IsRunning)
+                                    updateBotStatusCoroutine = Timing.RunCoroutine(UpdateBotStots(cancelSource));
+                            }
+                            catch { updateBotStatusCoroutine = Timing.RunCoroutine(UpdateBotStots(cancelSource)); }
+
+                            try
+                            {
+                                if (!updateBotTopicCoroutine.IsRunning)
+                                    updateBotTopicCoroutine = Timing.RunCoroutine(UpdateBotTopic(cancelSource));
+                            }
+                            catch { updateBotTopicCoroutine = Timing.RunCoroutine(UpdateBotTopic(cancelSource)); }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Logger.Warn($"[CON] Failed to start coroutines safely: {ex.Message}");
+                    }
+
+                    _ = TransmitAsync(new RemoteClient(ActionType.Log, ChannelType.GameEvents, PluginStart._lang.ServerConnected));
+
+                    lock (_lock)
+                    {
+                        _listenTask = Task.Run(() => ListenAsync(cancelSource));
+                    }
                 }
                 catch (IOException ioEx)
                 {
@@ -251,15 +413,32 @@ namespace Discord_Module.API
                 {
                     Logger.Warn($"[CON] {string.Format(PluginStart._lang.ConnectingError, PluginStart.Instance.Config.Debug ? sockEx.ToString() : sockEx.Message)}");
                 }
+                catch (OperationCanceledException) when (cancelSource.IsCancellationRequested)
+                {
+                    return;
+                }
                 catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     Logger.Error($"[CON] {string.Format(PluginStart._lang.UpdatingConnectionError, PluginStart.Instance.Config.Debug ? ex.ToString() : ex.Message)}");
                 }
+                lock (_lock)
+                {
+                    readyToSend = true; 
+                }
+                if (cancelSource.IsCancellationRequested)
+                    return;
 
-                readyToSend = false;
-                Client?.Dispose();
-                Logger.Warn($"[CON] {PluginStart._lang.RetryingConnectionIn} {RetryInterval.TotalSeconds}s...");
-                await Task.Delay(RetryInterval, cancelSource.Token);
+                if (!Connected || Client == null)
+                {
+                    Logger.Warn($"[CON] {PluginStart._lang.RetryingConnectionIn} {RetryInterval.TotalSeconds}s...");
+                }
+
+                try
+                {
+                    await Task.Delay(RetryInterval, cancelSource.Token).ConfigureAwait(false);
+                }
+                catch (TaskCanceledException) { }
+                try { await Task.Delay(RetryInterval, cancelSource.Token).ConfigureAwait(false); } catch { }
             }
         }
 
@@ -267,6 +446,15 @@ namespace Discord_Module.API
         {
             while (!cancelSource.IsCancellationRequested)
             {
+                lock (_lock)
+                {
+                    if (!readyToSend || !Connected)
+                    {
+                        yield return Timing.WaitForSeconds(15f);
+                        continue;
+                    }
+                }
+
                 try
                 {
                     int aliveHumans = Player.List.Count(player => player.IsAlive && player.IsHuman);
@@ -284,9 +472,9 @@ namespace Discord_Module.API
                         $"{string.Format(PluginStart._lang.AliveScps, aliveScps)}. {warheadText} " +
                         $"IP: {Server.IpAddress}:{Server.Port} TPS: {Server.Tps}"));
                 }
-                catch (Exception exception)
+                catch (Exception ex)
                 {
-                    Logger.Error(string.Format(PluginStart._lang.CouldNotUpdateChannelTopicError, exception));
+                    Logger.Error($"[CON] Topic update failed: {ex.Message}");
                 }
 
                 yield return Timing.WaitForSeconds(15f);
@@ -297,13 +485,24 @@ namespace Discord_Module.API
         {
             while (!cancelSource.IsCancellationRequested)
             {
+                lock (_lock)
+                {
+                    if (!readyToSend || !Connected)
+                    {
+                        yield return Timing.WaitForSeconds(3f);
+                        continue;
+                    }
+                }
+
                 try
                 {
                     int adminscount = Player.List.Count(player => player.HasPermission(PlayerPermissions.AdminChat));
-                    _ = TransmitAsync(new RemoteClient(ActionType.UpdateActivity, $"[Players: {Server.PlayerCount}/{Server.MaxPlayers} ; Admins: {adminscount}]"));
+                    _ = TransmitAsync(new RemoteClient(ActionType.UpdateActivity,
+                        $"[Players: {Server.PlayerCount}/{Server.MaxPlayers} ; Admins: {adminscount}]"));
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
+                    Logger.Warn($"[CON] Status update failed: {ex.Message}");
                 }
 
                 yield return Timing.WaitForSeconds(3f);

@@ -26,7 +26,7 @@ namespace Discord_Module
         public override Version RequiredApiVersion => new Version(1, 1, 4, 0);
         public static PluginStart Instance;
         public static TcpClientSCPSL _client;
-        private CancellationTokenSource _cts;
+        public static CancellationTokenSource _cts;
         public static Language _lang;
         private MapEvents MapEvents;
         private PlayerEvents PlayerEvents;
@@ -54,10 +54,14 @@ namespace Discord_Module
         {
             Instance = null;
             _client = null;
+            PlayerEvents = null;
+            MapEvents = null;
+            ServerEvents = null;
             CustomHandlersManager.UnregisterEventsHandler(MapEvents);
             CustomHandlersManager.UnregisterEventsHandler(PlayerEvents);
             CustomHandlersManager.UnregisterEventsHandler(ServerEvents);
             Application.logMessageReceived -= HandleLog;
+            _client?.Shutdown();
         }
 
         void HandleLog(string logString, string stackTrace, UnityEngine.LogType type)
